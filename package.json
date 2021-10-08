@@ -1,4 +1,5 @@
 {
+  "type": "module",
   "name": "docker-logs",
   "version": "1.0.0",
   "description": "log service for docker containers",
@@ -7,5 +8,10 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.17.1",
+    "socket.io": "^4.2.0",
+    "tail": "^2.2.3"
+  }
 }
