@@ -36,12 +36,14 @@ server.listen(port, () => {
     directories.forEach( containerDirectory => {
         const containerID = containerDirectory;
         var containerName = JSON.parse( fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString() ).Name;
+        var containerState = JSON.parse( fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString() ).State.Running;
         var fname = path.join(pathToContainers, containerID, containerID+'-json.log');
 
         meta[containerID] = {
             id: containerID,
             name: containerName,
-            logFileName: fname
+            logFileName: fname,
+            running: containerState
         }
 
         chokidar
@@ -50,10 +52,15 @@ server.listen(port, () => {
             fs.readFile(path.join(pathToContainers, containerID, configFileName), {}, (err, data)=> {
                 if(!err) {
                     var running = JSON.parse(data).State.Running;
-                    if(!running) {
+                    if(meta[containerID].running && !running) {
                         console.log("Emitting down ...!");
-                        io.of('/'+containerID).sockets.forEach(socket => {
-                            socket.emit(containerID+'-down');
+                        io.of('/meta').sockets.forEach(socket => {
+                            socket.emit('down', containerID);
+                        });
+                    }else if(!meta[containerID].running && running) {
+                        console.log("Emitting up ...!");
+                        io.of('/meta').sockets.forEach(socket => {
+                            socket.emit('up', containerID);
                         });
                     }
                 }
@@ -68,14 +75,6 @@ server.listen(port, () => {
                     socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
                 else 
                     socket.emit(containerID+'-init', data.split('\n'));
-
-                var running = JSON.parse(fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString()).State.Running;
-                if(!running) {
-                    console.log("Emitting down ...!");
-                    io.of('/'+containerID).sockets.forEach(socket => {
-                        socket.emit(containerID+'-down');
-                    });
-                }
 
                 var tail = spawn('tail', ['-n', 0, '-f', fname]);
                 tail.stdout.on('data', (data) => {
@@ -100,12 +99,14 @@ server.listen(port, () => {
             } else {
                 setTimeout(()=>{ // Wait till all files are initialized and follow the log tail
                     var containerName = JSON.parse( fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString() ).Name;
+                    var containerState = JSON.parse( fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString() ).State.Running;
                     var fname = path.join(pathToContainers, containerID, containerID+'-json.log');
                     
                     meta[containerID] = {
                         id: containerID,
                         name: containerName,
-                        logFileName: fname
+                        logFileName: fname,
+                        running: containerState
                     }
 
                     chokidar
@@ -114,9 +115,15 @@ server.listen(port, () => {
                         fs.readFile(path.join(pathToContainers, containerID, configFileName), {}, (err, data)=> {
                             if(!err) {
                                 var running = JSON.parse(data).State.Running;
-                                if(!running) {
-                                    io.of('/'+containerID).sockets.forEach(socket => {
-                                        socket.emit(containerID+'-down');
+                                if(meta[containerID].running && !running) {
+                                    console.log("Emitting down ...!");
+                                    io.of('/meta').sockets.forEach(socket => {
+                                        socket.emit('down', containerID);
+                                    });
+                                }else if(!meta[containerID].running && running) {
+                                    console.log("Emitting up ...!");
+                                    io.of('/meta').sockets.forEach(socket => {
+                                        socket.emit('up', containerID);
                                     });
                                 }
                             }
