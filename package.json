@@ -10,7 +10,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "cors": "^2.8.5",
+    "chokidar": "^3.5.2",
     "express": "^4.17.1",
     "socket.io": "^4.2.0"
   }
