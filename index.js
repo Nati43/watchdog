@@ -15,6 +15,7 @@ if (!Array.prototype.last){
 const app = express();
 const server = http.createServer(app);
 const port = process.env.PORT || 3000;
+const password = process.env.PASSWORD || '0000';
 const io = new Server(server, {
     cors: {
         origin: '*',
@@ -69,7 +70,6 @@ server.listen(port, () => {
 
         // Socket events
         io.of("/"+containerID).on("connection", (socket) => {
-            console.log("Connected ...");
             fs.readFile(fname, 'utf8', function(err, data){
                 if(data.split('\n').length > 50)
                     socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
@@ -132,7 +132,6 @@ server.listen(port, () => {
 
                     // Socket events
                     io.of("/"+containerID).on("connection", (socket) => {
-                        console.log("Connected ...");
                         fs.readFile(fname, 'utf8', function(err, data){
                             if(data.split('\n').length > 50)
                                 socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
@@ -160,6 +159,12 @@ server.listen(port, () => {
     // Serve meta content
     io.of("/meta").on("connection", (socket) => {
         socket.emit("meta", meta);
+    }).use(function(socket, next) {
+        if(socket.handshake.query.pin != password) {
+            socket.disconnect();
+        }else{
+            return next();
+        }
     });
 
     console.log(`Log server running at: ${port}`);
