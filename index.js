@@ -29,163 +29,192 @@ io.of("/meta").on("connection", (socket) => {
     const pathToContainers = path.join('/', 'var', 'lib', 'docker', 'containers'); // /var/lib/docker/containers/
     const configFileName = 'config.v2.json';
 
-    var directories = fs.readdirSync( pathToContainers );
-
-    var configWatchers = {};
-
-    directories.forEach( containerDirectory => {
-        const containerID = containerDirectory;
-        var containerName = JSON.parse( fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString() ).Name;
-        var containerState = JSON.parse( fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString() ).State.Running;
-        var fname = path.join(pathToContainers, containerID, containerID+'-json.log');
-
-        meta[containerID] = {
-            id: containerID,
-            name: containerName,
-            logFileName: fname,
-            running: containerState
+    fs.readdir( pathToContainers, (err, directories) => {
+        if(err) {
+            // Failed to read containers list
+            return socket.disconnect();
         }
 
-        // Watch container status
-        var configWatcher = chokidar.watch(path.join(pathToContainers, containerID, configFileName));
-        configWatcher.on('change', () => {
-            fs.readFile(path.join(pathToContainers, containerID, configFileName), {}, (err, data)=> {
-                if(!err) {
-                    var running = JSON.parse(data).State.Running;
-                    if(meta[containerID] != undefined && meta[containerID].running && !running) {
-                        meta[containerID].running = false;
-                        socket.emit('down', containerID);
-                    }else if(meta[containerID] != undefined && !meta[containerID].running && running) {
-                        meta[containerID].running = true;
-                        socket.emit('up', containerID);
-                    }
+        var configWatchers = {};
+        var tailers = {};
+    
+        directories.forEach( containerDirectory => {
+            const containerID = containerDirectory;
+
+            // Read container config
+            fs.readFile(path.join(pathToContainers, containerID, configFileName), (err, data) => {
+                if(err) {
+                    return 
                 }
-            });
-        });
-        configWatchers[containerID] = configWatcher;
 
-        // Event: Subscribe to log file
-        socket.on(containerID+'-subscribe', () => {
-            socket.emit(containerID+'-subscribed');
-            fs.readFile(fname, 'utf8', function(err, data) {
-                if(data.split('\n').length > 50)
-                    socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
-                else 
-                    socket.emit(containerID+'-init', data.split('\n'));
-
-                // Tail log file
-                var tail = spawn('tail', ['-n', 0, '-f', fname]);
-                tail.stdout.on('data', (data) => {
-                    data.toString().trim().split('\n').forEach(line => {
-                        socket.emit(containerID+'-line', JSON.parse(line.toString('utf-8')).log);
+                var config = JSON.parse(data.toString());
+                var containerName = config.Name;
+                var containerState = config.State.Running;
+                var fname = path.join(pathToContainers, containerID, containerID+'-json.log');
+    
+                meta[containerID] = {
+                    id: containerID,
+                    name: containerName,
+                    logFileName: fname,
+                    running: containerState
+                }
+    
+                // Watch config for status change
+                var configWatcher = chokidar.watch(path.join(pathToContainers, containerID, configFileName));
+                configWatcher.on('change', () => {
+                    fs.readFile(path.join(pathToContainers, containerID, configFileName), {}, (err, data)=> {
+                        if(!err) {
+                            var running = JSON.parse(data).State.Running;
+                            if(meta[containerID] != undefined && meta[containerID].running && !running) {
+                                meta[containerID].running = false;
+                                socket.emit('down', containerID);
+                            }else if(meta[containerID] != undefined && !meta[containerID].running && running) {
+                                meta[containerID].running = true;
+                                socket.emit('up', containerID);
+                            }
+                        }
                     });
                 });
+                configWatchers[containerID] = configWatcher;
 
-                // Close tail on disconnect (container)
-                socket.on(containerID+'-unsubscribe', () => {
-                    tail.kill();
-                    socket.emit(containerID+'-unsubscribed');
-                });
+                // Event: Subscribe to log file
+                socket.on(containerID+'-subscribe', () => {
+                    socket.emit(containerID+'-subscribed');
+                    fs.readFile(fname, 'utf8', function(err, data) {
+                        if(err) {
+                            return
+                        }
 
-                // Close tail on disconnect (socket)
-                socket.on('disconnect', ()=> {
-                    tail.kill();
-                });
-            });
-        });
+                        if(data.split('\n').length > 50)
+                            socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
+                        else 
+                            socket.emit(containerID+'-init', data.split('\n'));
 
-    });
+                        // Tail log file
+                        var tail = spawn('tail', ['-n', 0, '-f', fname]);
+                        tail.stdout.on('data', (data) => {
+                            data.toString().trim().split('\n').forEach(line => {
+                                socket.emit(containerID+'-line', JSON.parse(line.toString('utf-8')).log);
+                            });
+                        });
+                        tailers[containerID] = tail;
 
-    // Send meta
-    socket.emit("meta", meta);
-
-    // Watch containers to detect when containers are removed/added
-    var containersWatcher = fs.watch(pathToContainers, (eventType, filename) => {
-        if(eventType == 'rename') {
-            var containerID = filename;
-            if(meta[containerID] != undefined) {
-                delete meta[containerID];
-                if(configWatchers[containerID] != undefined) {
-                    configWatchers[containerID].close();
-                    delete configWatchers[containerID];
-                }
-                socket.emit('removed', containerID);
-            } else {
-                setTimeout(()=>{ // Wait till all files are initialized and follow the log tail
-                    var containerName = JSON.parse( fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString() ).Name;
-                    var containerState = JSON.parse( fs.readFileSync(path.join(pathToContainers, containerID, configFileName) ).toString() ).State.Running;
-                    var fname = path.join(pathToContainers, containerID, containerID+'-json.log');
-                    
-                    meta[containerID] = {
-                        id: containerID,
-                        name: containerName,
-                        logFileName: fname,
-                        running: containerState
-                    }
-
-                    // Watch container status
-                    var configWatcher = chokidar.watch(path.join(pathToContainers, containerID, configFileName));
-                    configWatcher.on('change', () => {
-                        fs.readFile(path.join(pathToContainers, containerID, configFileName), {}, (err, data)=> {
-                            if(!err) {
-                                var running = JSON.parse(data).State.Running;
-                                if(meta[containerID] != undefined && meta[containerID].running && !running) {
-                                    meta[containerID].running = false;
-                                    socket.emit('down', containerID);
-                                }else if(meta[containerID] != undefined && !meta[containerID].running && running) {
-                                    meta[containerID].running = true;
-                                    socket.emit('up', containerID);
-                                }
-                            }
+                        // Close tail on disconnect (container)
+                        socket.on(containerID+'-unsubscribe', () => {
+                            tail.kill();
+                            socket.emit(containerID+'-unsubscribed');
                         });
                     });
-                    configWatchers[containerID] = configWatcher;
+                });
+            });
+        });
 
-                    // Event: Subscribe to log file
-                    socket.on(containerID+'-subscribe', () => {
-                        socket.emit(containerID+'-subscribed');
-                        fs.readFile(fname, 'utf8', function(err, data) {
-                            if(data.split('\n').length > 50)
-                                socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
-                            else 
-                                socket.emit(containerID+'-init', data.split('\n'));
-            
-                            // Tail log file
-                            var tail = spawn('tail', ['-n', 0, '-f', fname]);
-                            tail.stdout.on('data', (data) => {
-                                data.toString().trim().split('\n').forEach(line => {
-                                    socket.emit(containerID+'-line', JSON.parse(line.toString('utf-8')).log);
+        // Send meta
+        socket.emit("meta", meta);
+
+        // Watch containers to detect when containers are removed/added
+        var containersWatcher = fs.watch(pathToContainers, (eventType, filename) => {
+            if(eventType == 'rename') {
+                var containerID = filename;
+                if(meta[containerID] != undefined) {
+                    delete meta[containerID];
+                    if(configWatchers[containerID] != undefined) {
+                        configWatchers[containerID].close();
+                        delete configWatchers[containerID];
+                    }
+                    socket.emit('removed', containerID);
+                } else {
+                    setTimeout(()=>{ // Wait till all files are initialized and follow the log tail
+                        // Read container config
+                        fs.readFile(path.join(pathToContainers, containerID, configFileName), (err, data) => {
+                            if(err) {
+                                socket.emit('removed', containerID);
+                                return 
+                            }
+
+                            var config = JSON.parse(data.toString());
+                            var containerName = config.Name;
+                            var containerState = config.State.Running;
+                            var fname = path.join(pathToContainers, containerID, containerID+'-json.log');
+
+                            meta[containerID] = {
+                                id: containerID,
+                                name: containerName,
+                                logFileName: fname,
+                                running: containerState
+                            }
+
+                            // Watch config for status change
+                            var configWatcher = chokidar.watch(path.join(pathToContainers, containerID, configFileName));
+                            configWatcher.on('change', () => {
+                                fs.readFile(path.join(pathToContainers, containerID, configFileName), {}, (err, data)=> {
+                                    if(!err) {
+                                        var running = JSON.parse(data).State.Running;
+                                        if(meta[containerID] != undefined && meta[containerID].running && !running) {
+                                            meta[containerID].running = false;
+                                            socket.emit('down', containerID);
+                                        }else if(meta[containerID] != undefined && !meta[containerID].running && running) {
+                                            meta[containerID].running = true;
+                                            socket.emit('up', containerID);
+                                        }
+                                    }
+                                });
+                            });
+                            configWatchers[containerID] = configWatcher;
+
+                            // Event: Subscribe to log file
+                            socket.on(containerID+'-subscribe', () => {
+                                socket.emit(containerID+'-subscribed');
+                                fs.readFile(fname, 'utf8', function(err, data) {
+                                    if(err) {
+                                        return
+                                    }
+
+                                    if(data.split('\n').length > 50)
+                                        socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
+                                    else 
+                                        socket.emit(containerID+'-init', data.split('\n'));
+
+                                    // Tail log file
+                                    var tail = spawn('tail', ['-n', 0, '-f', fname]);
+                                    tail.stdout.on('data', (data) => {
+                                        data.toString().trim().split('\n').forEach(line => {
+                                            socket.emit(containerID+'-line', JSON.parse(line.toString('utf-8')).log);
+                                        });
+                                    });
+                                    tailers[containerID] = tail;
+
+                                    // Close tail on disconnect (container)
+                                    socket.on(containerID+'-unsubscribe', () => {
+                                        tail.kill();
+                                        socket.emit(containerID+'-unsubscribed');
+                                    });
                                 });
                             });
 
-                            // Close tail on disconnect (container)
-                            socket.on(containerID+'-unsubscribe', () => {
-                                tail.kill();
-                                socket.emit(containerID+'-unsubscribed');
-                            });
-
-                            // Close tail on disconnect (socket)
-                            socket.on('disconnect', ()=> {
-                                tail.kill();
-                            });
+                            // Send container configs
+                            socket.emit('added', meta[containerID]);
                         });
-                    });
-
-                    // Send container configs
-                    socket.emit('added', meta[containerID]);
-                }, 5000);
+                    }, 5000);
+                }
             }
-        }
-    });
-
-    socket.on('disconnect', () => {
-        // Stop watching containers on disconnect (socket)
-        containersWatcher.close();
-        // Close container watcher on disconnect (socket)
-        Object.values(configWatchers).forEach(configWatcher => {
-            // Close container watcher on disconnect (socket)
-            configWatcher.close();
         });
+
+        socket.on('disconnect', () => {
+            // Stop watching containers on disconnect (socket)
+            containersWatcher.close();
+            // Close container watcher on disconnect (socket)
+            Object.values(configWatchers).forEach(configWatcher => {
+                // Close container watcher on disconnect (socket)
+                configWatcher.close();
+            });
+            // Close tailers on disconnect (socket)
+            Object.values(tailers).forEach(tail => {
+                // Close tailer on disconnect (socket)
+                tail.kill();
+            });
+        });
+
     });
 
 }).use(function(socket, next) {
