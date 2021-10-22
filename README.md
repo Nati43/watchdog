@@ -1,9 +1,11 @@
 ## Intro
 
-Watchdog is a real-time monitoring tool for your docker environment. 
-Using watchdog, you can monitor the active statuses and logs of your docker containers on your development and/or production servers in real-time without 
-having to remotely SSH into you servers. It watches over the docker 
-containers that are on the machine it is deployed on and sends log and status updates to any logged in subscribers if any.
+Watchdog is an open source real-time monitoring tool for your docker environment.
+Using watchdog, you can monitor the active statuses and logs of your docker containers 
+on your development and/or production servers in real-time without having to 
+remotely SSH into you servers. 
+It watches over the docker containers that are on the machine it is deployed on and 
+sends log and status updates to any logged in subscribers if any.
 
 [![Watch the video](https://img.youtube.com/vi/5eGYpKO5AaY/maxresdefault.jpg)](https://youtu.be/5eGYpKO5AaY)
 
