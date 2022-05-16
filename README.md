@@ -13,7 +13,7 @@ sends log and status updates to any logged in subscribers if any.
 
 ### Docker
 ```sh
-sudo docker run --volume /var/lib/docker/containers:/var/lib/docker/containers --volume /var/run/docker.sock:/app/docker.sock -p 9000:9000 -w /app -e PORT=9000 -e PASSWORD=1234 --name watchdog -d nati43/watchdog:1.02
+sudo docker run --volume /var/lib/docker/containers:/var/lib/docker/containers --volume /var/run/docker.sock:/app/docker.sock -p 9000:9000 -w /app -e PORT=9000 -e PASSWORD=1234 --name watchdog -d nati43/watchdog:2.0
 ```
 Use your prefered PORT and PASSWORD.
 Make sure the internal port and the environment variable port match.
@@ -23,7 +23,7 @@ deploying this on a linux host.
 ### Docker-compose
 ```yaml
 watchdog:
-    image: nati43/watchdog:1.02
+    image: nati43/watchdog:2.0
     volumes:
       - /var/lib/docker/containers:/var/lib/docker/containers
       - /var/run/docker.sock:/app/docker.sock
