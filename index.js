@@ -28,7 +28,6 @@ var meta = {}
 // Serve meta content
 io.of("/meta").on("connection", (socket) => {
     const pathToContainers = path.join('/', 'var', 'lib', 'docker', 'containers'); // /var/lib/docker/containers/
-    // const configFileName = 'config.v2.json';
     var tail; // Tail object for log subscription
     var intervalHandle; // Interval handle for refresh loop
 
@@ -45,71 +44,22 @@ io.of("/meta").on("connection", (socket) => {
 
             // Start event
             socket.on(container.Id+'-start', () => {
-                exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/start`, (error, stdout, stderr) => {
-                    if (error)
-                        console.log(`Exec error on start : ${error.message}`);
-                    
-                    // Container state has changed
-                    socket.emit('state-change', {
-                        id: container.Id,
-                        state: 'running'
-                    });
-                });
+                changeState(container.Id, 'start');
             });
 
             // Restart event
             socket.on(container.Id+'-restart', () => {
-                // Container state has changed
-                socket.emit('state-change', {
-                    id: container.Id,
-                    state: 'restarting'
-                });
-                exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/restart`, (error, stdout, stderr) => {
-                    if (error)
-                        console.log(`Exec error on restart : ${error.message}`);
-                    
-                    // Container state has changed
-                    socket.emit('state-change', {
-                        id: container.Id,
-                        state: 'running'
-                    });
-                });
+                changeState(container.Id, 'restart');
             });
 
             // Stop event
             socket.on(container.Id+'-stop', () => {
-                // Container state has changed
-                socket.emit('state-change', {
-                    id: container.Id,
-                    state: 'stopping'
-                });
-                exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/stop`, (error, stdout, stderr) => {
-                    if (error)
-                        console.log(`Exec error on stop : ${error.message}`);
-                    
-                    // Container state has changed
-                    socket.emit('state-change', {
-                        id: container.Id,
-                        state: 'exited'
-                    });
-                });
+                changeState(container.Id, 'stop');
             });
 
             // Remove event
             socket.on(container.Id+'-remove', () => {
-                // Container state has changed
-                socket.emit('state-change', {
-                    id: container.Id,
-                    state: 'removing'
-                });
-                exec(`curl -X DELETE --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}`, (error, stdout, stderr) => {
-                    if (error)
-                        console.log(`Exec error on remove : ${error.message}`);
-                    
-                    // Container state has changed
-                    delete meta[container.Id];
-                    socket.emit('removed', container.Id);
-                });
+                changeState(container.Id, 'remove');
             });
 
             // Event: Subscribe to log file
@@ -174,71 +124,22 @@ io.of("/meta").on("connection", (socket) => {
 
                         // Start event
                         socket.on(container.Id+'-start', () => {
-                            exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/start`, (error, stdout, stderr) => {
-                                if (error)
-                                    console.log(`Exec error on start : ${error.message}`);
-                                
-                                // Container state has changed
-                                socket.emit('state-change', {
-                                    id: container.Id,
-                                    state: 'running'
-                                });
-                            });
+                            changeState(container.Id, 'start');
                         });
 
                         // Restart event
                         socket.on(container.Id+'-restart', () => {
-                            // Container state has changed
-                            socket.emit('state-change', {
-                                id: container.Id,
-                                state: 'restarting'
-                            });
-                            exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/restart`, (error, stdout, stderr) => {
-                                if (error)
-                                    console.log(`Exec error on restart : ${error.message}`);
-                                
-                                // Container state has changed
-                                socket.emit('state-change', {
-                                    id: container.Id,
-                                    state: 'running'
-                                });
-                            });
+                            changeState(container.Id, 'restart');
                         });
 
                         // Stop event
                         socket.on(container.Id+'-stop', () => {
-                            // Container state has changed
-                            socket.emit('state-change', {
-                                id: container.Id,
-                                state: 'stopping'
-                            });
-                            exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/stop`, (error, stdout, stderr) => {
-                                if (error)
-                                    console.log(`Exec error on stop : ${error.message}`);
-                                
-                                // Container state has changed
-                                socket.emit('state-change', {
-                                    id: container.Id,
-                                    state: 'exited'
-                                });
-                            });
+                            changeState(container.Id, 'stop');
                         });
 
                         // Remove event
                         socket.on(container.Id+'-remove', () => {
-                            // Container state has changed
-                            socket.emit('state-change', {
-                                id: container.Id,
-                                state: 'removing'
-                            });
-                            exec(`curl -X DELETE --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}`, (error, stdout, stderr) => {
-                                if (error)
-                                    console.log(`Exec error on remove : ${error.message}`);
-                                
-                                // Container state has changed
-                                delete meta[container.Id];
-                                socket.emit('removed', container.Id);
-                            });
+                            changeState(container.Id, 'remove');
                         });
 
                         // Close tail on unsubscribe
@@ -310,6 +211,50 @@ io.of("/meta").on("connection", (socket) => {
         }
     });
 
+    function changeState(containerID, action) {
+        // State to emit before performing action on container
+        let statesToEmitBeforeChange = {
+            'start': 'starting',
+            'restart': 'restarting',
+            'stop': 'stopping',
+            'remove': 'removing',
+        }
+
+        // State to emit after performing action on container
+        let statesToEmitAfterChange = {
+            'start': 'running',
+            'restart': 'running',
+            'stop': 'exited',
+        }
+        
+        // Emit state before performing action if set
+        if(statesToEmitBeforeChange[action])
+            socket.emit('state-change', {
+                id: containerID,
+                state: statesToEmitBeforeChange[action]
+            });
+
+        // Send request to docker engine API change container state
+        exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${containerID.substring(0, 12)}/${action}`, (error) => {
+            if (error)
+                console.log(`Exec error on ${action} : ${error.message}`);
+            else {
+                if(Object.keys(statesToEmitAfterChange).includes(action))
+                    // Container state has changed
+                    socket.emit('state-change', {
+                        id: containerID,
+                        state: statesToEmitAfterChange[action]
+                    });
+                else if(action=='remove') {
+                    // Container state has changed
+                    delete meta[containerID];
+                    socket.emit('removed', containerID);
+                }
+            }
+            
+        });
+
+    }
 }).use(function(socket, next) {
     if(socket.handshake.query.pin != password) {
         socket.disconnect();
