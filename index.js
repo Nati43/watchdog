@@ -4,7 +4,8 @@ import chokidar from 'chokidar'
 import express from'express';
 import http from 'http';
 import { Server } from 'socket.io';
-import { spawn } from 'child_process';
+import { spawn, exec } from 'child_process';
+import axios from 'axios';
 
 if (!Array.prototype.last){
     Array.prototype.last = function(){
@@ -27,194 +28,286 @@ var meta = {}
 // Serve meta content
 io.of("/meta").on("connection", (socket) => {
     const pathToContainers = path.join('/', 'var', 'lib', 'docker', 'containers'); // /var/lib/docker/containers/
-    const configFileName = 'config.v2.json';
+    // const configFileName = 'config.v2.json';
+    var tail; // Tail object for log subscription
+    var intervalHandle; // Interval handle for refresh loop
 
-    fs.readdir( pathToContainers, (err, directories) => {
-        if(err) {
-            // Failed to read containers list
-            return socket.disconnect();
-        }
+    axios.get('http://v1.40/containers/json?all=1', {
+        socketPath: 'docker.sock'
+    }).then((rs) => {
+        rs.data.forEach(container => {
+            meta[container.Id] = {
+                id: container.Id,
+                name: container.Names[0],
+                logFileName: path.join(pathToContainers, container.Id, container.Id+'-json.log'),
+                state: container.State
+            };
 
-        var configWatchers = {};
-        var tailers = {};
-    
-        directories.forEach( containerDirectory => {
-            const containerID = containerDirectory;
-
-            // Read container config
-            fs.readFile(path.join(pathToContainers, containerID, configFileName), (err, data) => {
-                if(err) {
-                    return 
-                }
-
-                var config = JSON.parse(data.toString());
-                var containerName = config.Name;
-                var containerState = config.State.Running;
-                var fname = path.join(pathToContainers, containerID, containerID+'-json.log');
-    
-                meta[containerID] = {
-                    id: containerID,
-                    name: containerName,
-                    logFileName: fname,
-                    running: containerState
-                }
-    
-                // Watch config for status change
-                var configWatcher = chokidar.watch(path.join(pathToContainers, containerID, configFileName));
-                configWatcher.on('change', () => {
-                    fs.readFile(path.join(pathToContainers, containerID, configFileName), {}, (err, data)=> {
-                        if(!err) {
-                            var running = JSON.parse(data).State.Running;
-                            if(meta[containerID] != undefined && meta[containerID].running && !running) {
-                                meta[containerID].running = false;
-                                socket.emit('down', containerID);
-                            }else if(meta[containerID] != undefined && !meta[containerID].running && running) {
-                                meta[containerID].running = true;
-                                socket.emit('up', containerID);
-                            }
-                        }
+            // Start event
+            socket.on(container.Id+'-start', () => {
+                exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/start`, (error, stdout, stderr) => {
+                    if (error)
+                        console.log(`Exec error on start : ${error.message}`);
+                    
+                    // Container state has changed
+                    socket.emit('state-change', {
+                        id: container.Id,
+                        state: 'running'
                     });
                 });
-                configWatchers[containerID] = configWatcher;
+            });
 
-                // Event: Subscribe to log file
-                socket.on(containerID+'-subscribe', () => {
-                    socket.emit(containerID+'-subscribed');
-                    fs.readFile(fname, 'utf8', function(err, data) {
-                        if(err) {
-                            return
-                        }
+            // Restart event
+            socket.on(container.Id+'-restart', () => {
+                // Container state has changed
+                socket.emit('state-change', {
+                    id: container.Id,
+                    state: 'restarting'
+                });
+                exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/restart`, (error, stdout, stderr) => {
+                    if (error)
+                        console.log(`Exec error on restart : ${error.message}`);
+                    
+                    // Container state has changed
+                    socket.emit('state-change', {
+                        id: container.Id,
+                        state: 'running'
+                    });
+                });
+            });
 
-                        if(data.split('\n').length > 50)
-                            socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
-                        else 
-                            socket.emit(containerID+'-init', data.split('\n'));
+            // Stop event
+            socket.on(container.Id+'-stop', () => {
+                // Container state has changed
+                socket.emit('state-change', {
+                    id: container.Id,
+                    state: 'stopping'
+                });
+                exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/stop`, (error, stdout, stderr) => {
+                    if (error)
+                        console.log(`Exec error on stop : ${error.message}`);
+                    
+                    // Container state has changed
+                    socket.emit('state-change', {
+                        id: container.Id,
+                        state: 'exited'
+                    });
+                });
+            });
 
-                        // Tail log file
-                        var tail = spawn('tail', ['-n', 0, '-f', fname]);
-                        tail.stdout.on('data', (data) => {
-                            data.toString().trim().split('\n').forEach(line => {
-                                socket.emit(containerID+'-line', JSON.parse(line.toString('utf-8')).log);
-                            });
-                        });
-                        tailers[containerID] = tail;
+            // Remove event
+            socket.on(container.Id+'-remove', () => {
+                // Container state has changed
+                socket.emit('state-change', {
+                    id: container.Id,
+                    state: 'removing'
+                });
+                exec(`curl -X DELETE --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}`, (error, stdout, stderr) => {
+                    if (error)
+                        console.log(`Exec error on remove : ${error.message}`);
+                    
+                    // Container state has changed
+                    delete meta[container.Id];
+                    socket.emit('removed', container.Id);
+                });
+            });
 
-                        // Close tail on disconnect (container)
-                        socket.on(containerID+'-unsubscribe', () => {
-                            tail.kill();
-                            socket.emit(containerID+'-unsubscribed');
+            // Event: Subscribe to log file
+            socket.on(container.Id+'-subscribe', () => {
+                let logFilename = path.join(pathToContainers, container.Id, container.Id+'-json.log');
+                socket.emit(container.Id+'-subscribed');
+
+                // Close tail on unsubscribe
+                socket.on(container.Id+'-unsubscribe', () => {
+                    if(tail && tail.kill) {
+                        tail.kill();
+                    }
+                    socket.emit(container.Id+'-unsubscribed');
+                });
+
+                fs.readFile(logFilename, 'utf8', function(err, data) {
+                    if(err) {
+                        console.log('Error reading log file : ', err);
+                        return
+                    }
+
+                    if(data.split('\n').length > 50)
+                        socket.emit(container.Id+'-init', data.split('\n').slice(data.split('\n').length - 50));
+                    else 
+                        socket.emit(container.Id+'-init', data.split('\n'));
+
+                    // Tail log file
+                    tail = spawn('tail', ['-n', 0, '-f', logFilename]);
+                    tail.stdout.on('data', (data) => {
+                        data.toString().trim().split('\n').forEach(line => {
+                            try {
+                                socket.emit(container.Id+'-line', JSON.parse(line.toString('utf-8')).log);
+                            } catch(err) {
+                                socket.emit(container.Id+'-line', line.toString('utf-8'));
+                            }
                         });
                     });
                 });
             });
+
         });
 
         // Send meta
         socket.emit("meta", meta);
 
-        // Watch containers to detect when containers are removed/added
-        var containersWatcher = fs.watch(pathToContainers, (eventType, filename) => {
-            if(eventType == 'rename') {
-                var containerID = filename;
-                if(meta[containerID] != undefined) {
-                    delete meta[containerID];
-                    if(configWatchers[containerID] != undefined) {
-                        configWatchers[containerID].close();
-                        delete configWatchers[containerID];
-                    }
-                    socket.emit('removed', containerID);
-                } else {
-                    setTimeout(()=>{ // Wait till all files are initialized and follow the log tail
-                        // Read container config
-                        fs.readFile(path.join(pathToContainers, containerID, configFileName), (err, data) => {
-                            if(err) {
-                                socket.emit('removed', containerID);
-                                return 
-                            }
+        // Update meta info every 5 seconds
+        intervalHandle = setInterval(() => {
+            axios.get('http://v1.40/containers/json?all=1', {
+                socketPath: 'docker.sock'
+            }).then((rs) => {
+                rs.data.forEach(container => {
+                    if(!Object.keys(meta).includes(container.Id)) {
+                        // New container added
+                        meta[container.Id] = {
+                            id: container.Id,
+                            name: container.Names[0],
+                            logFileName: path.join(pathToContainers, container.Id, container.Id+'-json.log'),
+                            state: container.State
+                        };
+                        // Send container configs
+                        socket.emit('added', meta[container.Id]);
 
-                            var config = JSON.parse(data.toString());
-                            var containerName = config.Name;
-                            var containerState = config.State.Running;
-                            var fname = path.join(pathToContainers, containerID, containerID+'-json.log');
-
-                            meta[containerID] = {
-                                id: containerID,
-                                name: containerName,
-                                logFileName: fname,
-                                running: containerState
-                            }
-
-                            // Watch config for status change
-                            var configWatcher = chokidar.watch(path.join(pathToContainers, containerID, configFileName));
-                            configWatcher.on('change', () => {
-                                fs.readFile(path.join(pathToContainers, containerID, configFileName), {}, (err, data)=> {
-                                    if(!err) {
-                                        var running = JSON.parse(data).State.Running;
-                                        if(meta[containerID] != undefined && meta[containerID].running && !running) {
-                                            meta[containerID].running = false;
-                                            socket.emit('down', containerID);
-                                        }else if(meta[containerID] != undefined && !meta[containerID].running && running) {
-                                            meta[containerID].running = true;
-                                            socket.emit('up', containerID);
-                                        }
-                                    }
+                        // Start event
+                        socket.on(container.Id+'-start', () => {
+                            exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/start`, (error, stdout, stderr) => {
+                                if (error)
+                                    console.log(`Exec error on start : ${error.message}`);
+                                
+                                // Container state has changed
+                                socket.emit('state-change', {
+                                    id: container.Id,
+                                    state: 'running'
                                 });
                             });
-                            configWatchers[containerID] = configWatcher;
-
-                            // Event: Subscribe to log file
-                            socket.on(containerID+'-subscribe', () => {
-                                socket.emit(containerID+'-subscribed');
-                                fs.readFile(fname, 'utf8', function(err, data) {
-                                    if(err) {
-                                        return
-                                    }
-
-                                    if(data.split('\n').length > 50)
-                                        socket.emit(containerID+'-init', data.split('\n').slice(data.split('\n').length - 50));
-                                    else 
-                                        socket.emit(containerID+'-init', data.split('\n'));
-
-                                    // Tail log file
-                                    var tail = spawn('tail', ['-n', 0, '-f', fname]);
-                                    tail.stdout.on('data', (data) => {
-                                        data.toString().trim().split('\n').forEach(line => {
-                                            socket.emit(containerID+'-line', JSON.parse(line.toString('utf-8')).log);
-                                        });
-                                    });
-                                    tailers[containerID] = tail;
-
-                                    // Close tail on disconnect (container)
-                                    socket.on(containerID+'-unsubscribe', () => {
-                                        tail.kill();
-                                        socket.emit(containerID+'-unsubscribed');
-                                    });
-                                });
-                            });
-
-                            // Send container configs
-                            socket.emit('added', meta[containerID]);
                         });
-                    }, 5000);
-                }
-            }
-        });
 
-        socket.on('disconnect', () => {
-            // Stop watching containers on disconnect (socket)
-            containersWatcher.close();
-            // Close container watcher on disconnect (socket)
-            Object.values(configWatchers).forEach(configWatcher => {
-                // Close container watcher on disconnect (socket)
-                configWatcher.close();
-            });
-            // Close tailers on disconnect (socket)
-            Object.values(tailers).forEach(tail => {
-                // Close tailer on disconnect (socket)
-                tail.kill();
-            });
-        });
+                        // Restart event
+                        socket.on(container.Id+'-restart', () => {
+                            // Container state has changed
+                            socket.emit('state-change', {
+                                id: container.Id,
+                                state: 'restarting'
+                            });
+                            exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/restart`, (error, stdout, stderr) => {
+                                if (error)
+                                    console.log(`Exec error on restart : ${error.message}`);
+                                
+                                // Container state has changed
+                                socket.emit('state-change', {
+                                    id: container.Id,
+                                    state: 'running'
+                                });
+                            });
+                        });
 
+                        // Stop event
+                        socket.on(container.Id+'-stop', () => {
+                            // Container state has changed
+                            socket.emit('state-change', {
+                                id: container.Id,
+                                state: 'stopping'
+                            });
+                            exec(`curl -X POST --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}/stop`, (error, stdout, stderr) => {
+                                if (error)
+                                    console.log(`Exec error on stop : ${error.message}`);
+                                
+                                // Container state has changed
+                                socket.emit('state-change', {
+                                    id: container.Id,
+                                    state: 'exited'
+                                });
+                            });
+                        });
+
+                        // Remove event
+                        socket.on(container.Id+'-remove', () => {
+                            // Container state has changed
+                            socket.emit('state-change', {
+                                id: container.Id,
+                                state: 'removing'
+                            });
+                            exec(`curl -X DELETE --unix-socket docker.sock http://v1.40/containers/${container.Id.substring(0, 12)}`, (error, stdout, stderr) => {
+                                if (error)
+                                    console.log(`Exec error on remove : ${error.message}`);
+                                
+                                // Container state has changed
+                                delete meta[container.Id];
+                                socket.emit('removed', container.Id);
+                            });
+                        });
+
+                        // Close tail on unsubscribe
+                        socket.on(container.Id+'-unsubscribe', () => {
+                            if(tail && tail.kill) {
+                                tail.kill();
+                            }
+                            socket.emit(container.Id+'-unsubscribed');
+                        });
+
+                        // Event: Subscribe to log file
+                        socket.on(container.Id+'-subscribe', () => {
+                            let logFilename = path.join(pathToContainers, container.Id, container.Id+'-json.log');
+                            socket.emit(container.Id+'-subscribed');
+
+                            fs.readFile(logFilename, 'utf8', function(err, data) {
+                                if(err) {
+                                    console.log('Error reading log file: ', err);
+                                    return
+                                }
+
+                                if(data.split('\n').length > 50)
+                                    socket.emit(container.Id+'-init', data.split('\n').slice(data.split('\n').length - 50));
+                                else 
+                                    socket.emit(container.Id+'-init', data.split('\n'));
+
+                                // Tail log file
+                                let tail = spawn('tail', ['-n', 0, '-f', logFilename]);
+                                tail.stdout.on('data', (data) => {
+                                    data.toString().trim().split('\n').forEach(line => {
+                                        socket.emit(container.Id+'-line', JSON.parse(line.toString('utf-8')).log);
+                                    });
+                                });
+                            });
+                        });
+
+                    } else if( container.State != meta[container.Id].State ) {
+                        // Container state has changed
+                        socket.emit('state-change', {
+                            id: container.Id,
+                            state: container.State
+                        });
+                    }
+                });
+
+                // Check for removed container
+                Object.keys(meta).forEach(containerID => {
+                    if(rs.data.find(x => x.Id == containerID) == undefined) {
+                        // Container removed
+                        delete meta[containerID];
+                        socket.emit('removed', containerID);
+                    }
+                });
+            }).catch(err => {
+                console.log('Error getting list of containers: ', err);
+            });
+        }, 5000);
+
+    }).catch(err => {
+        console.log('Error getting list of containers: ', err);
+    });
+
+    // Clear the refresh interval and close any open tail
+    socket.on('disconnect', () => {
+        clearInterval(intervalHandle);
+        // Kill the tail process
+        if(tail && tail.kill) {
+            tail.kill();
+        }
     });
 
 }).use(function(socket, next) {
