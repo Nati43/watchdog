@@ -173,7 +173,11 @@ io.of("/meta").on("connection", (socket) => {
                                     let tail = spawn('tail', ['-n', 0, '-f', logFilename]);
                                     tail.stdout.on('data', (data) => {
                                         data.toString().trim().split('\n').forEach(line => {
-                                            socket.emit(container.Id+'-line', JSON.parse(line.toString('utf-8')).log);
+                                            try {
+                                                socket.emit(container.Id+'-line', JSON.parse(line.toString('utf-8')).log);
+                                            } catch (error) {
+                                                socket.emit(container.Id+'-line', line.toString('utf-8'));
+                                            }
                                         });
                                     });
                                 });
